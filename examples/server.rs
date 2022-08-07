@@ -10,12 +10,14 @@
 
 #[macro_use]
 extern crate rocket;
+
+use rocket::http::ContentType;
 use rocket_seek_stream::SeekStream;
 
 // stream from an in memory buffer
 #[get("/memory")]
-fn hello<'a>() -> SeekStream<'a> {
-    let bytes = &include_bytes!("./cruel_angels_thesis.webm")[..];
+fn hello() -> SeekStream {
+    let bytes = &include_bytes!("./fly_me_to_the_moon.webm")[..];
     let len = bytes.len();
     let stream = std::io::Cursor::new(bytes);
 
@@ -24,30 +26,34 @@ fn hello<'a>() -> SeekStream<'a> {
 
 // stream from a given filepath
 #[get("/from_path")]
-fn from_path<'a>() -> std::io::Result<SeekStream<'a>> {
-    SeekStream::from_path("fly_me_to_the_moon.webm")
+async fn from_path() -> std::io::Result<SeekStream> {
+    SeekStream::from_path("examples/fly_me_to_the_moon.webm").await
 }
 
 // some long media
 #[get("/long")]
-fn long<'a>() -> std::io::Result<SeekStream<'a>> {
-    SeekStream::from_path("kosmodrom.webm")
+async fn long() -> std::io::Result<SeekStream> {
+    SeekStream::from_path("fly_me_to_the_moon.mkv").await
 }
 
 // some longer media
 #[get("/")]
-fn longer<'a>() -> std::io::Result<SeekStream<'a>> {
-    SeekStream::from_path("ison.webm")
+fn longer() -> (ContentType, &'static str) {
+    (
+        ContentType::HTML,
+        r#"<!DOCTYPE html>
+        <html>
+        <head>
+        </head>
+        <body>
+            <video src="/from_path" controls />
+        </body>
+        </html>"#
+        )
 }
 
-fn main() {
-    rocket::Rocket::custom(
-        rocket::Config::build(rocket::config::Environment::Development)
-            .address("localhost")
-            .port(8000)
-            .finalize()
-            .unwrap(),
-    )
-    .mount("/", routes![hello, from_path, long, longer])
-    .launch();
+#[rocket::launch]
+fn launch() -> _ {
+    rocket::build()
+        .mount("/", routes![hello, from_path, long, longer])
 }

@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
+use std::io::SeekFrom;
 use crate::ReadSeek;
 use rand;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use rocket::futures::io::Cursor;
+use rocket::tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, AsyncReadExt};
 
 pub type Ranges = Vec<(u64, u64)>;
 
@@ -51,7 +53,7 @@ impl<'a> MultipartReader<'a> {
         ranges: Vec<(u64, u64)>,
     ) -> MultipartReader<'a>
     where
-        T: Read + Seek + 'a,
+        T: AsyncRead + AsyncSeek + 'a,
     {
         let stream = Box::new(stream);
 
@@ -101,7 +103,7 @@ impl<'a> MultipartReader<'a> {
     }
 }
 
-impl<'a> Read for MultipartReader<'a> {
+impl<'a> AsyncRead for MultipartReader<'a> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         // The number of bytes read into the buffer so far.
         let mut c = 0;

@@ -30,7 +30,7 @@
 //!
 //! ```
 
-mod multipart;
+//mod multipart;
 mod seekstream;
 
 pub use seekstream::{ReadSeek, SeekStream};

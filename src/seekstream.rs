@@ -1,13 +1,15 @@
-use crate::multipart::MultipartReader;
 use rocket::response::{self, Responder, Response};
 use std::cell::RefCell;
-use std::io::{Read, Seek};
+use std::io::{SeekFrom};
 use std::path::Path;
+use futures::executor::block_on;
+use rocket::tokio::fs::File;
+use rocket::tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use tree_magic;
 
 /// Alias trait for Read + Seek
-pub trait ReadSeek: Read + Seek {}
-impl<T: Read + Seek> ReadSeek for T {}
+pub trait ReadSeek: AsyncRead + AsyncSeek + Unpin + Send {}
+impl<T: AsyncRead + AsyncSeek + Unpin + Send> ReadSeek for T {}
 
 /// Infer the mime type of a stream of bytes using an excerpt from the beginning of the stream
 fn infer_mime_type(prelude: &[u8]) -> String {
@@ -21,16 +23,16 @@ fn infer_mime_type(prelude: &[u8]) -> String {
 /// The Accept Ranges header will always be set.
 /// If a range request is received, it will respond with the requested offset.
 /// Multipart range requests are also supported.
-pub struct SeekStream<'a> {
-    stream: RefCell<Box<dyn ReadSeek + 'a>>,
+pub struct SeekStream {
+    stream: RefCell<Box<dyn ReadSeek>>,
     length: Option<u64>,
-    content_type: Option<&'a str>,
+    content_type: Option<&'static str>,
 }
 
-impl<'a> SeekStream<'a> {
-    pub fn new<T>(s: T) -> SeekStream<'a>
+impl SeekStream {
+    pub fn new<T>(s: T) -> SeekStream
     where
-        T: Read + Seek + 'a,
+        T: AsyncRead + AsyncSeek + Unpin + Send + 'static,
     {
         Self::with_opts(s, None, None)
     }
@@ -38,10 +40,10 @@ impl<'a> SeekStream<'a> {
     pub fn with_opts<T>(
         stream: T,
         stream_len: impl Into<Option<u64>>,
-        content_type: impl Into<Option<&'a str>>,
-    ) -> SeekStream<'a>
+        content_type: impl Into<Option<&'static str>>,
+    ) -> SeekStream
     where
-        T: Read + Seek + 'a,
+        T: AsyncRead + AsyncSeek + Unpin + Send + 'static,
     {
         SeekStream {
             stream: RefCell::new(Box::new(stream)),
@@ -52,9 +54,9 @@ impl<'a> SeekStream<'a> {
 
     /// Serve content from a file path. The mime type will be inferred by taking a sample from
     /// The beginning of the stream.
-    pub fn from_path<T: AsRef<Path>>(p: T) -> std::io::Result<Self> {
-        let mut file = std::fs::File::open(p.as_ref())?;
-        let len = file.stream_len()?;
+    pub async fn from_path<T: AsRef<Path>>(p: T) -> std::io::Result<SeekStream> {
+        let mut file = File::open(p.as_ref()).await?;
+        let len = file.seek(SeekFrom::End(0)).await?;
 
         Ok(Self::with_opts(file, len, None))
     }
@@ -92,10 +94,9 @@ fn range_header_parts(header: &range_header::ByteRange) -> (Option<u64>, Option<
     }
 }
 
-impl<'a> Responder<'a> for SeekStream<'a> {
+impl<'a> Responder<'a, 'a> for SeekStream {
     fn respond_to(self, req: &rocket::Request) -> response::Result<'a> {
         use rocket::http::Status;
-        use std::io::SeekFrom;
 
         const SERVER_ERROR: Status = Status::InternalServerError;
         const RANGE_ERROR: Status = Status::RangeNotSatisfiable;
@@ -103,10 +104,12 @@ impl<'a> Responder<'a> for SeekStream<'a> {
         // Get the total length of the stream if not already specified
         let stream_len = match self.length {
             Some(x) => x,
-            _ => self
-                .stream
-                .borrow_mut()
-                .stream_len()
+            _ => block_on(
+                self
+                    .stream
+                    .borrow_mut()
+                    .seek(SeekFrom::End(0))
+                )
                 .map_err(|_| SERVER_ERROR)?,
         };
 
@@ -119,16 +122,27 @@ impl<'a> Responder<'a> for SeekStream<'a> {
                 // And passing it to the infer_mime_type function
                 let mut prelude: [u8; 256] = [0; 256];
 
-                let c = self
+                block_on(
+                    self
+                        .stream
+                        .borrow_mut()
+                        .rewind()
+                )
+                    .map_err(|_| SERVER_ERROR)?;
+
+                let c = block_on(self
                     .stream
                     .borrow_mut()
                     .read(&mut prelude)
+                )
                     .map_err(|_| SERVER_ERROR)?;
 
                 // Seek to the beginning of the stream to reset the data we took for the sample
-                self.stream
-                    .borrow_mut()
-                    .seek(std::io::SeekFrom::Start(0))
+                block_on(
+                    self.stream
+                        .borrow_mut()
+                        .seek(std::io::SeekFrom::Start(0))
+                    )
                     .map_err(|_| SERVER_ERROR)?;
 
                 infer_mime_type(&prelude[..c])
@@ -168,7 +182,7 @@ impl<'a> Responder<'a> for SeekStream<'a> {
 
             // Stream multipart/bytes if multiple ranges have been requested
             if ranges.len() > 1 {
-                let rd = MultipartReader::new(
+                /*let rd = MultipartReader::new(
                     self.stream.into_inner(),
                     stream_len,
                     mime_type.clone(),
@@ -179,18 +193,21 @@ impl<'a> Responder<'a> for SeekStream<'a> {
                     "Content-Type",
                     format!("multipart/byterange; boundary={}", rd.boundary.clone()),
                 );
-                resp.set_streamed_body(rd);
+                resp.set_streamed_body(rd);*/
+                unimplemented!("currently not supported")
             } else {
                 // Stream a single range request if only one was present in the byte ranges
                 let &(start, end) = ranges.get(0).unwrap();
 
                 // Seek the stream to the desired position
-                self.stream
-                    .borrow_mut()
-                    .seek(SeekFrom::Start(start))
+                block_on(
+                    self.stream
+                        .borrow_mut()
+                        .seek(SeekFrom::Start(start))
+                )
                     .map_err(|_| SERVER_ERROR)?;
 
-                let mut stream: Box<dyn Read> = Box::new(self.stream.into_inner());
+                let mut stream: Box<dyn AsyncRead + Unpin + Send> = Box::new(self.stream.into_inner());
                 if end + 1 < stream_len {
                     stream = Box::new(stream.take(end + 1 - start));
                 }
